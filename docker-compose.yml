@@ -1,0 +1,23 @@
+services:
+  distrotv-proxy:
+    image: ghcr.io/YOUR_USERNAME/distrotv-proxy:latest
+    container_name: distrotv-proxy
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8787}:8787"
+    volumes:
+      # Persists channel_state.json (toggle exclusions + probe results) across restarts
+      - distrotv-data:/data
+    environment:
+      - PORT=8787
+      # Uncomment to override defaults:
+      # - STATE_FILE=/data/channel_state.json
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  distrotv-data:

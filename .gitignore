@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Runtime state (don't commit channel state — it's instance-specific)
+channel_state.json
+channel_state.json.tmp
+
+# Old generated artifacts
+distro_live.m3u
+distro_validate.csv
+epg_now.json
+distro_channels_cache.json
+
+# Old dev scripts (kept locally, not part of the release)
+distro_epg_now.py
+distro_m3u.py
+validate_distro_m3u.py
+DistroTV_Project_Summary.md
+
+# HAR captures (sensitive, large)
+*.har
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
