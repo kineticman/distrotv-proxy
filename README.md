@@ -23,7 +23,7 @@ DistroTV streams use server-side ad insertion (SSAI) with time-anchored HLS URLs
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/distrotv-proxy
+git clone https://github.com/kineticman/distrotv-proxy
 cd distrotv-proxy
 
 # 2. Start it
@@ -43,7 +43,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8787:8787 \
   -v distrotv-data:/data \
-  ghcr.io/YOUR_USERNAME/distrotv-proxy:latest
+  ghcr.io/kineticman/distrotv-proxy:latest
 ```
 
 ## Channels DVR Setup
@@ -113,15 +113,15 @@ docker compose up
 
 ```bash
 # Authenticate
-echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u kineticman --password-stdin
 
 # Build and push
-docker build -t ghcr.io/YOUR_USERNAME/distrotv-proxy:latest .
-docker push ghcr.io/YOUR_USERNAME/distrotv-proxy:latest
+docker build -t ghcr.io/kineticman/distrotv-proxy:latest .
+docker push ghcr.io/kineticman/distrotv-proxy:latest
 
 # Tag a release
-docker tag ghcr.io/YOUR_USERNAME/distrotv-proxy:latest ghcr.io/YOUR_USERNAME/distrotv-proxy:v1.0.0
-docker push ghcr.io/YOUR_USERNAME/distrotv-proxy:v1.0.0
+docker tag ghcr.io/kineticman/distrotv-proxy:latest ghcr.io/kineticman/distrotv-proxy:v1.0.0
+docker push ghcr.io/kineticman/distrotv-proxy:v1.0.0
 ```
 
 ## GitHub Actions (Auto-publish on push)

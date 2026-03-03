@@ -3,7 +3,7 @@ FROM python:3.12-slim
 # Metadata
 LABEL org.opencontainers.image.title="distrotv-proxy"
 LABEL org.opencontainers.image.description="DistroTV HLS proxy for Channels DVR and VLC"
-LABEL org.opencontainers.image.source="https://github.com/YOUR_USERNAME/distrotv-proxy"
+LABEL org.opencontainers.image.source="https://github.com/kineticman/distrotv-proxy"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Don't write .pyc files, don't buffer stdout/stderr

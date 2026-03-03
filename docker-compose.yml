@@ -1,6 +1,6 @@
 services:
   distrotv-proxy:
-    image: ghcr.io/YOUR_USERNAME/distrotv-proxy:latest
+    image: ghcr.io/kineticman/distrotv-proxy:latest
     container_name: distrotv-proxy
     restart: unless-stopped
     ports:
