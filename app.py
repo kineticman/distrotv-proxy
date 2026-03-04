@@ -412,6 +412,15 @@ def pick_variant_from_master(master_text: str, master_url: str) -> Optional[str]
     return best_uri
 
 
+# CDNs that use short-lived session tokens in variant URLs.
+# Resolving master→variant server-side causes "session not found" errors
+# because the token expires before the client fetches it.
+# For these hosts we skip resolution and let the client handle it.
+SESSION_CDN_HOSTS = {
+    "d3s7x6kmqcnb6b.cloudfront.net",
+}
+
+
 async def resolve_to_media_playlist_url(
     client: httpx.AsyncClient,
     upstream_url: str,
@@ -420,7 +429,12 @@ async def resolve_to_media_playlist_url(
     """
     Resolve upstream_url to a playable media playlist URL.
     If verify_segments=True, fetch the media playlist and raise if it has no segments.
+    Skips master→variant resolution for session-based CDNs.
     """
+    from urllib.parse import urlsplit as _urlsplit
+    if _urlsplit(upstream_url).netloc in SESSION_CDN_HOSTS:
+        # Return master URL directly — client must select variant itself
+        return upstream_url
     r = await client.get(
         upstream_url,
         headers=HLS_HEADERS,
@@ -679,6 +693,18 @@ async def api_probe(tvg_id: str) -> JSONResponse:
         await _probe_channel(ch, client)
     s = state_store.get(tvg_id)
     return JSONResponse({"tvg_id": tvg_id, "status": s.status, "failures": s.failures})
+
+
+# ------------------------------------------------------------------
+# API — force feed refresh + re-probe
+# ------------------------------------------------------------------
+@app.post("/api/feed/refresh")
+async def api_feed_refresh() -> JSONResponse:
+    feed_cache._fetched_at = 0.0  # invalidate cache
+    async with _make_client() as client:
+        channels = await feed_cache.get_channels(client)
+    asyncio.create_task(probe_all_channels(channels))
+    return JSONResponse({"channels": len(channels), "probing": True})
 
 
 # ------------------------------------------------------------------

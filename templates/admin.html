@@ -120,6 +120,7 @@
   <h1>⬡ DistroTV Admin</h1>
   <span class="version">v0.7.0</span>
   <a class="m3u-link" href="/playlist.m3u" target="_blank">↓ playlist.m3u</a>
+  <a class="m3u-link" href="/epg.xml" target="_blank">↓ epg.xml</a>
   <div class="pulse"></div>
 </header>
 
@@ -153,6 +154,7 @@
   </select>
   <div class="spacer"></div>
   <span class="refresh-info" id="refresh-info">—</span>
+  <button class="btn" onclick="probeAll(this)">⚡ Probe All</button>
   <button class="btn primary" onclick="loadData()">↺ Refresh</button>
 </div>
 
@@ -183,6 +185,18 @@ let sortKey = 'name';
 let sortAsc = true;
 let timer = null;
 let lastLoaded = null;
+
+async function probeAll(btn) {
+  if (!confirm('Re-probe all channels? This may take ~30s.')) return;
+  btn.textContent = 'Probing…'; btn.disabled = true;
+  try {
+    await fetch('/api/feed/refresh', {method:'POST'});
+    await loadData();
+  } catch(e) {
+    document.getElementById('refresh-info').textContent = '⚠ probe error';
+  }
+  btn.textContent = '⚡ Probe All'; btn.disabled = false;
+}
 
 async function loadData() {
   try {
