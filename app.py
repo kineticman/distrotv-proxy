@@ -509,11 +509,12 @@ async def _startup() -> None:
             return
     asyncio.create_task(probe_all_channels(channels))
     asyncio.create_task(_epg_refresh_loop())
+    asyncio.create_task(_feed_refresh_loop())
 
 
 async def _epg_refresh_loop() -> None:
-    """Background task: refresh EPG cache every EPG_TTL_SECONDS."""
-    await asyncio.sleep(EPG_TTL_SECONDS)  # let startup settle first
+    """Background task: refresh EPG cache every hour."""
+    await asyncio.sleep(EPG_TTL_SECONDS)
     while True:
         try:
             async with _make_client() as client:
@@ -526,6 +527,22 @@ async def _epg_refresh_loop() -> None:
         except Exception as e:
             log.warning("EPG background refresh failed: %s", e)
         await asyncio.sleep(EPG_TTL_SECONDS)
+
+
+async def _feed_refresh_loop() -> None:
+    """Background task: refresh channel feed daily and re-probe."""
+    FEED_REFRESH_INTERVAL = 86400  # 24 hours
+    await asyncio.sleep(FEED_REFRESH_INTERVAL)
+    while True:
+        try:
+            feed_cache._fetched_at = 0.0  # force cache invalidation
+            async with _make_client() as client:
+                channels = await feed_cache.get_channels(client)
+            log.info("daily feed refresh complete: %d channels", len(channels))
+            await probe_all_channels(channels)
+        except Exception as e:
+            log.warning("daily feed refresh failed: %s", e)
+        await asyncio.sleep(FEED_REFRESH_INTERVAL)
 
 
 # ------------------------------------------------------------------
