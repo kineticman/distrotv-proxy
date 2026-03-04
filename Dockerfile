@@ -3,7 +3,7 @@ FROM python:3.12-slim
 # Metadata
 LABEL org.opencontainers.image.title="distrotv-proxy"
 LABEL org.opencontainers.image.description="DistroTV HLS proxy for Channels DVR and VLC"
-LABEL org.opencontainers.image.source="https://github.com/kineticman/distrotv-proxy"
+LABEL org.opencontainers.image.source="https://github.com/YOUR_USERNAME/distrotv-proxy"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Don't write .pyc files, don't buffer stdout/stderr
@@ -16,8 +16,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app
+# Copy app and templates
 COPY app.py .
+COPY templates/ templates/
 
 # Create non-root user and data directory
 RUN useradd -r -s /bin/false appuser && \

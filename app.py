@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
 
 # -----------------------------
 # Upstream endpoints
@@ -27,14 +28,22 @@ EPG_URL  = "https://tv.jsrdn.com/epg/query.php"
 # -----------------------------
 # Android TV UA matches what the DistroTV app sends — required for EPG endpoint access
 ANDROID_UA = "Dalvik/2.1.0 (Linux; U; Android 9; AFTT Build/STT9.221129.002) GTV/AFTT DistroTV/2.0.9"
-BROWSER_UA  = "Mozilla/5.0"
+BROWSER_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+
+# Headers required by DistroTV's CloudFront Function edge validator
+HLS_HEADERS = {
+    "User-Agent":  BROWSER_UA,
+    "Origin":      "https://distro.tv",
+    "Referer":     "https://distro.tv/",
+}
 
 # -----------------------------
 # Tunables
 # -----------------------------
 DEFAULT_GROUP             = "DistroTV"
 DEFAULT_TTL_SECONDS       = 43200        # feed cache TTL (12h — feed changes infrequently)
-HTTP_TIMEOUT_SECONDS      = 15           # per-request timeout
+HTTP_TIMEOUT_SECONDS      = 15           # per-request timeout (playback)
+PROBE_TIMEOUT_SECONDS     = 10           # timeout during startup probe (fail fast, retry on demand)
 FEED_RETRY_ATTEMPTS       = 3
 FEED_RETRY_SLEEP_SECONDS  = 0.75
 EPG_TTL_SECONDS                = 3600  # cache EPG data for 1 hour
@@ -42,7 +51,7 @@ VARIANT_TTL_SECONDS            = 300   # mediatailor / empty channels — 5 min
 VARIANT_TTL_SERVERSIDE_SECONDS = 0     # serverside channels — never cache (time-anchored URLs)
 CHANNEL_COOLDOWN_SECONDS       = 120   # cooldown after MAX_CONSECUTIVE_FAILURES
 MAX_CONSECUTIVE_FAILURES  = 3
-PROBE_CONCURRENCY         = 12           # parallel workers during startup probe
+PROBE_CONCURRENCY         = 6            # parallel workers during startup probe (lower = less CDN pressure)
 STATE_FILE                = os.environ.get("STATE_FILE", "channel_state.json")
 
 # -----------------------------
@@ -277,7 +286,7 @@ class FeedCache:
     async def _refresh_locked(self, client: httpx.AsyncClient) -> None:
         headers_variants = [
             {"User-Agent": ANDROID_UA, "Accept": "application/json,*/*"},
-            {"User-Agent": BROWSER_UA, "Referer": "https://distro.tv/", "Accept": "application/json,*/*"},
+            {**HLS_HEADERS, "Accept": "application/json,*/*"},
         ]
         last_err: Optional[Exception] = None
         for attempt in range(1, FEED_RETRY_ATTEMPTS + 1):
@@ -403,18 +412,48 @@ def pick_variant_from_master(master_text: str, master_url: str) -> Optional[str]
     return best_uri
 
 
-async def resolve_to_media_playlist_url(client: httpx.AsyncClient, upstream_url: str) -> str:
+async def resolve_to_media_playlist_url(
+    client: httpx.AsyncClient,
+    upstream_url: str,
+    verify_segments: bool = False,
+) -> str:
+    """
+    Resolve upstream_url to a playable media playlist URL.
+    If verify_segments=True, fetch the media playlist and raise if it has no segments.
+    """
     r = await client.get(
         upstream_url,
-        headers={"User-Agent": BROWSER_UA, "Referer": "https://distro.tv/"},
+        headers=HLS_HEADERS,
         timeout=HTTP_TIMEOUT_SECONDS,
     )
     r.raise_for_status()
     text = r.text or ""
-    if "#EXT-X-STREAM-INF" not in text:
-        return upstream_url
-    variant = pick_variant_from_master(text, upstream_url)
-    return variant or upstream_url
+
+    if "#EXT-X-STREAM-INF" in text:
+        variant = pick_variant_from_master(text, upstream_url)
+        media_url = variant or upstream_url
+    else:
+        media_url = upstream_url
+        text = ""  # haven't fetched media playlist yet
+
+    if verify_segments:
+        if not text:
+            r2 = await client.get(
+                media_url,
+                headers=HLS_HEADERS,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            r2.raise_for_status()
+            text = r2.text or ""
+        # A valid media playlist must have at least one segment URI
+        has_segments = any(
+            ln.strip() and not ln.strip().startswith("#")
+            for ln in text.splitlines()
+        )
+        if not has_segments:
+            raise RuntimeError(f"playlist has no segments: {media_url[:80]}")
+
+    return media_url
 
 
 # -----------------------------
@@ -423,7 +462,7 @@ async def resolve_to_media_playlist_url(client: httpx.AsyncClient, upstream_url:
 async def _probe_channel(ch: Channel, client: httpx.AsyncClient) -> None:
     upstream = sanitize_upstream_url(ch.upstream_url)
     try:
-        media_url = await resolve_to_media_playlist_url(client, upstream)
+        media_url = await resolve_to_media_playlist_url(client, upstream, verify_segments=True)
         await state_store.record_success(ch.tvg_id, media_url)
         log.debug("probe ok  %s %s", ch.tvg_id, ch.name)
     except Exception as e:
@@ -437,7 +476,7 @@ async def probe_all_channels(channels: Dict[str, Channel]) -> None:
 
     async def _bounded(ch: Channel) -> None:
         async with sem:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=PROBE_TIMEOUT_SECONDS) as client:
                 await _probe_channel(ch, client)
 
     t0 = time.time()
@@ -453,6 +492,7 @@ async def probe_all_channels(channels: Dict[str, Channel]) -> None:
 app         = FastAPI(title="DistroTV Resolver", version="0.7.0")
 feed_cache  = FeedCache(ttl_seconds=DEFAULT_TTL_SECONDS)
 state_store = StateStore(path=STATE_FILE)
+templates   = Jinja2Templates(directory="templates")
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -609,336 +649,9 @@ async def api_probe(tvg_id: str) -> JSONResponse:
 # ------------------------------------------------------------------
 # Admin UI
 # ------------------------------------------------------------------
-ADMIN_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>DistroTV Admin</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg:       #0a0c10;
-    --surface:  #111318;
-    --border:   #1e2330;
-    --accent:   #00e5ff;
-    --ok:       #00c896;
-    --err:      #ff4757;
-    --warn:     #ffa502;
-    --muted:    #4a5568;
-    --text:     #cdd6f4;
-    --text-dim: #6c7a96;
-    --mono:     'IBM Plex Mono', monospace;
-    --sans:     'IBM Plex Sans', sans-serif;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; min-height: 100vh; }
-
-  body::before {
-    content: '';
-    position: fixed; inset: 0;
-    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,229,255,.012) 2px, rgba(0,229,255,.012) 4px);
-    pointer-events: none; z-index: 9999;
-  }
-
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 16px 28px;
-    display: flex; align-items: center; gap: 14px;
-    background: var(--surface);
-  }
-  header h1 { font-family: var(--mono); font-size: 17px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
-  .version { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--border); padding: 2px 8px; border-radius: 3px; }
-  .m3u-link { font-family: var(--mono); font-size: 11px; color: var(--accent); text-decoration: none; border: 1px solid rgba(0,229,255,.25); padding: 3px 10px; border-radius: 3px; transition: background .15s; }
-  .m3u-link:hover { background: rgba(0,229,255,.08); }
-  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 2s ease-in-out infinite; margin-left: auto; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-
-  .summary-bar { display: flex; gap: 1px; padding: 14px 28px; background: var(--surface); border-bottom: 1px solid var(--border); }
-  .stat { flex: 1; padding: 12px 16px; background: var(--bg); border: 1px solid var(--border); }
-  .stat:first-child { border-radius: 6px 0 0 6px; }
-  .stat:last-child  { border-radius: 0 6px 6px 0; }
-  .stat .val { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1; }
-  .stat .lbl { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .1em; margin-top: 4px; }
-  .stat.s-info .val { color: var(--accent); }
-  .stat.s-ok   .val { color: var(--ok); }
-  .stat.s-err  .val { color: var(--err); }
-  .stat.s-dim  .val { color: var(--muted); }
-
-  .toolbar {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 12px 28px; border-bottom: 1px solid var(--border); background: var(--surface);
-  }
-  .toolbar input, .toolbar select {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
-    color: var(--text); font-family: var(--mono); font-size: 12px; padding: 6px 10px; outline: none;
-    transition: border-color .2s;
-  }
-  .toolbar input { width: 200px; }
-  .toolbar input:focus { border-color: var(--accent); }
-  .spacer { flex: 1; }
-  .refresh-info { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-  .btn { background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-family: var(--mono); font-size: 12px; padding: 6px 14px; cursor: pointer; transition: all .15s; }
-  .btn:hover, .btn.primary { border-color: var(--accent); color: var(--accent); }
-
-  .table-wrap { overflow-x: auto; padding: 0 28px 60px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  thead th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim); text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; user-select: none; }
-  thead th:hover { color: var(--accent); }
-  thead th.sorted { color: var(--accent); }
-  thead th.sorted::after { content: attr(data-dir); margin-left: 4px; }
-  tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
-  tbody tr:hover { background: rgba(0,229,255,.025); }
-  tbody td { padding: 9px 12px; vertical-align: middle; }
-
-  .ch-logo { width: 32px; height: 32px; object-fit: contain; background: var(--border); border-radius: 4px; display: block; }
-  .ch-logo-ph { width: 32px; height: 32px; background: var(--border); border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; color: var(--muted); }
-  .ch-name { font-weight: 600; }
-  .ch-id   { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-
-  .badge { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
-  .b-ok       { background: rgba(0,200,150,.12); color: var(--ok);    border: 1px solid rgba(0,200,150,.3); }
-  .b-error    { background: rgba(255,71,87,.12);  color: var(--err);   border: 1px solid rgba(255,71,87,.3); }
-  .b-cooldown { background: rgba(255,165,2,.12);  color: var(--warn);  border: 1px solid rgba(255,165,2,.3); }
-  .b-untested { background: rgba(74,85,104,.15);  color: var(--muted); border: 1px solid rgba(74,85,104,.4); }
-  .b-mediatailor { background: rgba(124,58,237,.12); color: #a78bfa; border: 1px solid rgba(124,58,237,.3); }
-  .b-serverside  { background: rgba(0,229,255,.08);  color: var(--accent); border: 1px solid rgba(0,229,255,.25); }
-  .b-empty       { background: rgba(0,200,150,.08);  color: var(--ok);     border: 1px solid rgba(0,200,150,.25); }
-
-  .failures { font-family: var(--mono); font-size: 12px; }
-  .failures.bad { color: var(--err); }
-  .ago { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
-
-  .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: background .2s; }
-  .toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; bottom: 3px; background: var(--muted); border-radius: 50%; transition: transform .2s, background .2s; }
-  .toggle input:checked + .toggle-slider { background: rgba(0,200,150,.25); }
-  .toggle input:checked + .toggle-slider::before { transform: translateX(16px); background: var(--ok); }
-
-  .act-btn { background: transparent; border: 1px solid var(--border); border-radius: 3px; color: var(--text-dim); font-family: var(--mono); font-size: 10px; padding: 3px 8px; cursor: pointer; transition: all .15s; }
-  .act-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-  .loading, .empty-state { text-align: center; padding: 60px; font-family: var(--mono); color: var(--muted); font-size: 13px; }
-  .blink { animation: blink 1s step-start infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-</style>
-</head>
-<body>
-
-<header>
-  <h1>⬡ DistroTV Admin</h1>
-  <span class="version">v0.7.0</span>
-  <a class="m3u-link" href="/playlist.m3u" target="_blank">↓ playlist.m3u</a>
-  <div class="pulse"></div>
-</header>
-
-<div class="summary-bar">
-  <div class="stat s-info"><div class="val" id="s-total">—</div><div class="lbl">Total</div></div>
-  <div class="stat s-ok">  <div class="val" id="s-ok">—</div><div class="lbl">Working</div></div>
-  <div class="stat s-err"> <div class="val" id="s-err">—</div><div class="lbl">Errors</div></div>
-  <div class="stat s-dim"> <div class="val" id="s-untested">—</div><div class="lbl">Untested</div></div>
-  <div class="stat s-info"><div class="val" id="s-included">—</div><div class="lbl">In M3U</div></div>
-</div>
-
-<div class="toolbar">
-  <input type="text" id="search" placeholder="Search channels…" oninput="applyFilters()"/>
-  <select id="f-status" onchange="applyFilters()">
-    <option value="">All statuses</option>
-    <option value="ok">✅ OK</option>
-    <option value="error">❌ Error</option>
-    <option value="cooldown">⚠️ Cooldown</option>
-    <option value="untested">· Untested</option>
-  </select>
-  <select id="f-adtype" onchange="applyFilters()">
-    <option value="">All ad types</option>
-    <option value="mediatailor">mediatailor</option>
-    <option value="serverside">serverside</option>
-    <option value="empty">empty</option>
-  </select>
-  <select id="f-included" onchange="applyFilters()">
-    <option value="">All channels</option>
-    <option value="true">Included in M3U</option>
-    <option value="false">Excluded</option>
-  </select>
-  <div class="spacer"></div>
-  <span class="refresh-info" id="refresh-info">—</span>
-  <button class="btn primary" onclick="loadData()">↺ Refresh</button>
-</div>
-
-<div class="table-wrap">
-  <div class="loading" id="loading">Loading<span class="blink">_</span></div>
-  <div class="empty-state" id="empty-state" style="display:none">No channels match your filters.</div>
-  <table id="table" style="display:none">
-    <thead>
-      <tr>
-        <th style="width:40px;cursor:default"></th>
-        <th data-key="name" data-dir="↑" onclick="sortBy(this)">Channel</th>
-        <th data-key="status" onclick="sortBy(this)">Status</th>
-        <th data-key="ad_type" onclick="sortBy(this)">Ad Type</th>
-        <th data-key="failures" onclick="sortBy(this)">Failures</th>
-        <th data-key="last_ok_ago" onclick="sortBy(this)">Last OK</th>
-        <th data-key="last_fail_ago" onclick="sortBy(this)">Last Fail</th>
-        <th style="cursor:default">In M3U</th>
-        <th style="cursor:default">Actions</th>
-      </tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
-</div>
-
-<script>
-let allChannels = [];
-let sortKey = 'name';
-let sortAsc = true;
-let timer = null;
-let lastLoaded = null;
-
-async function loadData() {
-  try {
-    const d = await fetch('/api/channels').then(r => r.json());
-    allChannels = d.channels;
-    lastLoaded  = new Date();
-    document.getElementById('s-total').textContent    = d.summary.total;
-    document.getElementById('s-ok').textContent       = d.summary.ok;
-    document.getElementById('s-err').textContent      = d.summary.error;
-    document.getElementById('s-untested').textContent = d.summary.untested;
-    document.getElementById('s-included').textContent = d.summary.included;
-    applyFilters();
-    clearTimeout(timer);
-    timer = setTimeout(loadData, 10000);
-    document.getElementById('refresh-info').textContent =
-      'Updated ' + lastLoaded.toLocaleTimeString() + ' · auto 10s';
-  } catch(e) {
-    document.getElementById('refresh-info').textContent = '⚠ fetch error';
-  }
-}
-
-function fmtAgo(s) {
-  if (s == null) return '—';
-  if (s < 60)   return Math.round(s) + 's ago';
-  if (s < 3600) return Math.round(s/60) + 'm ago';
-  return Math.round(s/3600) + 'h ago';
-}
-
-const STATUS_BADGE = {
-  ok:       '<span class="badge b-ok">✓ ok</span>',
-  error:    '<span class="badge b-error">✗ error</span>',
-  cooldown: '<span class="badge b-cooldown">⏸ cooldown</span>',
-  untested: '<span class="badge b-untested">· untested</span>',
-};
-
-function applyFilters() {
-  const q  = document.getElementById('search').value.toLowerCase();
-  const fs = document.getElementById('f-status').value;
-  const fa = document.getElementById('f-adtype').value;
-  const fi = document.getElementById('f-included').value;
-
-  let rows = allChannels.filter(c => {
-    if (q  && !c.name.toLowerCase().includes(q) && !c.tvg_id.includes(q)) return false;
-    if (fs && c.status   !== fs)              return false;
-    if (fa && c.ad_type  !== fa)              return false;
-    if (fi && String(c.included) !== fi)      return false;
-    return true;
-  });
-
-  rows.sort((a, b) => {
-    let av = a[sortKey], bv = b[sortKey];
-    const nil = sortAsc ? Infinity : -Infinity;
-    if (av == null) av = nil;
-    if (bv == null) bv = nil;
-    if (typeof av === 'string') return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-    return sortAsc ? av - bv : bv - av;
-  });
-
-  const loading = document.getElementById('loading');
-  const table   = document.getElementById('table');
-  const empty   = document.getElementById('empty-state');
-  const tbody   = document.getElementById('tbody');
-
-  loading.style.display = 'none';
-
-  if (rows.length === 0) {
-    table.style.display = 'none';
-    empty.style.display = 'block';
-    return;
-  }
-  empty.style.display = 'none';
-  table.style.display = 'table';
-
-  tbody.innerHTML = rows.map(c => {
-    const logo = c.logo
-      ? `<img class="ch-logo" src="${c.logo}" alt="" loading="lazy" onerror="this.outerHTML='<div class=ch-logo-ph>?</div>'">`
-      : `<div class="ch-logo-ph">?</div>`;
-    const badge = STATUS_BADGE[c.status] || `<span class="badge b-untested">${c.status}</span>`;
-    const adB   = `<span class="badge b-${c.ad_type}">${c.ad_type}</span>`;
-    const fail  = `<span class="failures ${c.failures > 0 ? 'bad' : ''}">${c.failures}</span>`;
-    return `
-    <tr>
-      <td>${logo}</td>
-      <td><div class="ch-name">${c.name}</div><div class="ch-id">#${c.tvg_id}</div></td>
-      <td>${badge}</td>
-      <td>${adB}</td>
-      <td>${fail}</td>
-      <td class="ago">${fmtAgo(c.last_ok_ago)}</td>
-      <td class="ago">${fmtAgo(c.last_fail_ago)}</td>
-      <td>
-        <label class="toggle">
-          <input type="checkbox" ${c.included ? 'checked' : ''}
-            onchange="toggleCh('${c.tvg_id}', this)"/>
-          <span class="toggle-slider"></span>
-        </label>
-      </td>
-      <td>
-        <button class="act-btn" onclick="probeCh('${c.tvg_id}', this)">probe</button>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
-function sortBy(th) {
-  const key = th.dataset.key;
-  if (sortKey === key) { sortAsc = !sortAsc; }
-  else { sortKey = key; sortAsc = true; }
-  document.querySelectorAll('thead th').forEach(t => { t.classList.remove('sorted'); delete t.dataset.dir; });
-  th.classList.add('sorted');
-  th.dataset.dir = sortAsc ? '↑' : '↓';
-  applyFilters();
-}
-
-async function toggleCh(id, cb) {
-  cb.disabled = true;
-  try {
-    const d = await fetch(`/api/channels/${id}/toggle`, {method:'POST'}).then(r=>r.json());
-    cb.checked = d.included;
-    const c = allChannels.find(x => x.tvg_id === id);
-    if (c) c.included = d.included;
-    document.getElementById('s-included').textContent = allChannels.filter(x=>x.included).length;
-  } catch { cb.checked = !cb.checked; }
-  cb.disabled = false;
-}
-
-async function probeCh(id, btn) {
-  btn.textContent = '…'; btn.disabled = true;
-  try {
-    const d = await fetch(`/api/channels/${id}/probe`, {method:'POST'}).then(r=>r.json());
-    const c = allChannels.find(x => x.tvg_id === id);
-    if (c) { c.status = d.status; c.failures = d.failures; if (d.status==='ok') c.last_ok_ago=0; else c.last_fail_ago=0; }
-    applyFilters();
-  } catch { btn.textContent = '!'; }
-  btn.textContent = 'probe'; btn.disabled = false;
-}
-
-loadData();
-</script>
-</body>
-</html>"""
-
-
 @app.get("/admin", response_class=HTMLResponse)
-async def admin() -> HTMLResponse:
-    return HTMLResponse(content=ADMIN_HTML)
+async def admin(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse("admin.html", {"request": request})
 
 
 # ------------------------------------------------------------------
