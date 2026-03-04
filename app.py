@@ -32,9 +32,9 @@ BROWSER_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 
 # Headers required by DistroTV's CloudFront Function edge validator
 HLS_HEADERS = {
-    "User-Agent":  BROWSER_UA,
-    "Origin":      "https://distro.tv",
-    "Referer":     "https://distro.tv/",
+    "User-Agent": BROWSER_UA,
+    "Origin":     "https://distro.tv",
+    "Referer":    "https://distro.tv/",
 }
 
 # -----------------------------
@@ -286,7 +286,7 @@ class FeedCache:
     async def _refresh_locked(self, client: httpx.AsyncClient) -> None:
         headers_variants = [
             {"User-Agent": ANDROID_UA, "Accept": "application/json,*/*"},
-            {**HLS_HEADERS, "Accept": "application/json,*/*"},
+            {"User-Agent": BROWSER_UA, "Referer": "https://distro.tv/", "Accept": "application/json,*/*"},
         ]
         last_err: Optional[Exception] = None
         for attempt in range(1, FEED_RETRY_ATTEMPTS + 1):
@@ -508,6 +508,24 @@ async def _startup() -> None:
             log.warning("startup feed warm failed: %s", e)
             return
     asyncio.create_task(probe_all_channels(channels))
+    asyncio.create_task(_epg_refresh_loop())
+
+
+async def _epg_refresh_loop() -> None:
+    """Background task: refresh EPG cache every EPG_TTL_SECONDS."""
+    await asyncio.sleep(EPG_TTL_SECONDS)  # let startup settle first
+    while True:
+        try:
+            async with _make_client() as client:
+                channels = await feed_cache.get_channels(client)
+                xml = await _fetch_epg_xml(channels, client)
+            async with _epg_lock:
+                _epg_cache["xml"] = xml
+                _epg_cache["fetched_at"] = time.time()
+            log.info("EPG background refresh complete")
+        except Exception as e:
+            log.warning("EPG background refresh failed: %s", e)
+        await asyncio.sleep(EPG_TTL_SECONDS)
 
 
 # ------------------------------------------------------------------
