@@ -758,7 +758,7 @@ async def _fetch_epg_xml(channels: Dict[str, Channel], client: httpx.AsyncClient
     slots_by_id: Dict[str, list] = {}
     try:
         r = await client.get(
-            f"https://tv.jsrdn.com/epg/query.php?id={all_ids}",
+            f"https://tv.jsrdn.com/epg/query.php?id={all_ids}&range=now,24h",
             headers={"User-Agent": ANDROID_UA, "Accept": "application/json,*/*"},
             timeout=30,
         )
