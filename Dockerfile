@@ -21,9 +21,12 @@ COPY app.py .
 COPY templates/ templates/
 
 # Create non-root user and data directory
+# /data is chmod 777 so it remains writable even if a host volume is mounted
+# with different ownership (e.g. root-owned bind mounts or named volumes on
+# some Docker setups).  The container drops to appuser immediately after.
 RUN useradd -r -s /bin/false appuser && \
     mkdir -p /data && \
-    chown appuser:appuser /data
+    chmod 777 /data
 
 USER appuser
 

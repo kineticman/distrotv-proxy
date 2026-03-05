@@ -10,8 +10,7 @@ services:
       - distrotv-data:/data
     environment:
       - PORT=8787
-      # Uncomment to override defaults:
-      # - STATE_FILE=/data/channel_state.json
+      - STATE_FILE=/data/channel_state.json
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
       interval: 30s

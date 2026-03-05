@@ -52,7 +52,26 @@ VARIANT_TTL_SERVERSIDE_SECONDS = 0     # serverside channels — never cache (ti
 CHANNEL_COOLDOWN_SECONDS       = 120   # cooldown after MAX_CONSECUTIVE_FAILURES
 MAX_CONSECUTIVE_FAILURES  = 3
 PROBE_CONCURRENCY         = 6            # parallel workers during startup probe (lower = less CDN pressure)
-STATE_FILE                = os.environ.get("STATE_FILE", "channel_state.json")
+def _resolve_state_file() -> str:
+    """Return STATE_FILE env var if set, otherwise /data/channel_state.json if writable,
+    otherwise fall back to app directory (always writable inside the container)."""
+    if "STATE_FILE" in os.environ:
+        return os.environ["STATE_FILE"]
+    data_path = "/data/channel_state.json"
+    try:
+        os.makedirs("/data", exist_ok=True)
+        # Test writability
+        test = data_path + ".writable_test"
+        with open(test, "w") as f:
+            f.write("")
+        os.remove(test)
+        return data_path
+    except OSError:
+        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "channel_state.json")
+        log.warning("STATE_FILE: /data is not writable, falling back to %s", fallback)
+        return fallback
+
+STATE_FILE = _resolve_state_file()
 
 # -----------------------------
 # Logging
