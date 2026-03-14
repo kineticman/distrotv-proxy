@@ -602,7 +602,7 @@ async def playlist(request: Request) -> Response:
             continue
         logo_attr = f' tvg-logo="{ch.logo}"' if ch.logo else ""
         out.append(
-            f'#EXTINF:-1 tvg-id="{m3u_escape(ch.tvg_id)}"{logo_attr}'
+            f'#EXTINF:-1 channel-id="{m3u_escape(ch.tvg_id)}" tvg-id="{m3u_escape(ch.tvg_id)}"{logo_attr}'
             f' group-title="{m3u_escape(DEFAULT_GROUP)}",{m3u_escape(ch.name)}'
         )
         out.append(f"{base}/play/{m3u_escape(ch.tvg_id)}.m3u8")
