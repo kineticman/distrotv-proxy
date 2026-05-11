@@ -1,3 +1,5 @@
+**This is no longer maintained.  I recommend moving over to https://github.com/kineticman/FastChannels
+
 # distrotv-proxy
 
 A lightweight proxy that makes [DistroTV](https://distro.tv) live streams work reliably in **Channels DVR**, **VLC**, and other HLS clients.
